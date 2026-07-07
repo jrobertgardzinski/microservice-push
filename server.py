@@ -16,6 +16,16 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+SERVICE = "push"
+
+def log(level, message):
+    """The stack's shared log line (observability/README.md in the aggregator repo): ISO
+    time, level, cid/trace placeholders (this stdlib stack sets neither), service, message."""
+    from datetime import datetime, timezone
+    stamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
+    print(f"{stamp} {level:<5} [cid=-] [trace=-] {SERVICE} - {message}", flush=True)
+
+
 PROVIDER = os.environ.get("PUSH_PROVIDER", "stub")
 # device tokens are opaque but bounded: base64url-ish, a sane length window
 TOKEN = re.compile(r"^[A-Za-z0-9_\-:.]{16,4096}$")
@@ -35,7 +45,7 @@ def send(to, subject, body):
     if len(title) > MAX_TITLE or len(text) > MAX_BODY:
         raise ValueError("notification too long")
     if PROVIDER == "stub":
-        print(f"push-stub: to {to[:12]}...: {title!r} / {text[:40]!r}", flush=True)
+        log("INFO", f"stub delivery to {to[:12]}...: {title!r} / {text[:40]!r}")
         return "stub-" + str(abs(hash((to, title, text))) % 10_000_000)
     raise ValueError(f"unknown PUSH_PROVIDER: {PROVIDER}")   # real providers plug in here
 
@@ -73,10 +83,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def log_message(self, fmt, *args):
-        print(f"push: {self.command} {self.path}")
+        log("INFO", f"{self.command} {self.path}")
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8089"))
-    print(f"push channel listening on {port} (provider={PROVIDER})")
+    log("INFO", f"push channel listening on {port} (provider={PROVIDER})")
     ThreadingHTTPServer(("", port), Handler).serve_forever()
