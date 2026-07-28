@@ -10,6 +10,7 @@ for real; the wire contract the paddock speaks never changes. Here `to` is a dev
 is the notification title, `body` is its text.
 """
 
+import hmac
 import json
 import os
 import re
@@ -27,6 +28,15 @@ def log(level, message):
 
 
 PROVIDER = os.environ.get("PUSH_PROVIDER", "stub")
+# The same guard the sibling mail service has had all along: only trusted callers may send. Without
+# it this endpoint takes a message from anything that can reach the port — today the compose network
+# (every container in the stack), and the README's own next step is "point PUSH_PROVIDER at a real gateway
+# and give it credentials", at which point an unauthenticated endpoint becomes a paid-push pump
+# and a phishing channel ("Your sign-in code is ..." from the portal's own number).
+API_KEY = os.environ.get("PUSH_API_KEY")
+# A request body this service has any business reading: every legitimate one is a short JSON object.
+MAX_BODY_BYTES = 8192
+
 # device tokens are opaque but bounded: base64url-ish, a sane length window
 TOKEN = re.compile(r"^[A-Za-z0-9_\-:.]{16,4096}$")
 MAX_TITLE = 120
@@ -45,7 +55,9 @@ def send(to, subject, body):
     if len(title) > MAX_TITLE or len(text) > MAX_BODY:
         raise ValueError("notification too long")
     if PROVIDER == "stub":
-        log("INFO", f"stub delivery to {to[:12]}...: {title!r} / {text[:40]!r}")
+        # metadata only: a notification's title and body are the user's own content, and these logs
+        # go to Loki (see the sibling sms service, where the same line carried MFA codes)
+        log("INFO", f"stub delivery to {to[:12]}... ({len(title)}+{len(text)} chars)")
         return "stub-" + str(abs(hash((to, title, text))) % 10_000_000)
     raise ValueError(f"unknown PUSH_PROVIDER: {PROVIDER}")   # real providers plug in here
 
@@ -62,8 +74,19 @@ class Handler(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/send":
             self._json(404, {"error": "not found"})
             return
+        if API_KEY and not hmac.compare_digest(self.headers.get("X-Api-Key", ""), API_KEY):
+            self._json(401, {"status": "UNAUTHORIZED"})
+            return
         try:
-            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._json(400, {"status": "BAD_REQUEST", "error": "invalid Content-Length"})
+            return
+        if length > MAX_BODY_BYTES:
+            self._json(413, {"status": "REJECTED", "error": "body too large"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(max(0, length)) or b"{}")
         except ValueError:
             self._json(400, {"status": "BAD_REQUEST", "error": "invalid JSON"})
             return
